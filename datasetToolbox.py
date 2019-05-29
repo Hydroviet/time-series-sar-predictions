@@ -2,6 +2,7 @@ import os
 import rasterio
 import numpy
 from matplotlib import pyplot as plt
+import h5py
 
 geoTiffPath = './GeoTiffData/'
 
@@ -39,7 +40,7 @@ def getTileFromCenterPoint(arr, x, y, xSize = 400, ySize = 400):
     return ((topLeftX, topLeftY), (bottomRightX, bottomRightY))
 
 
-def randomizePositionOnBoundary(img, nRandom = 50):
+def randomizePositionOnBoundary(img, nRandom = 50, xSize = 400, ySize = 400):
     from random import random
     listBoundaryPosition = getListBoundaryPositionFrom2DArray(img)
     n = len(listBoundaryPosition)
@@ -49,7 +50,7 @@ def randomizePositionOnBoundary(img, nRandom = 50):
     for i in range(nRandom):
         pos = round(min(n - 1, i * step + random() * step - 1))
         x, y = listBoundaryPosition[pos]
-        listRandomizedTiles.append(getTileFromCenterPoint(img, x, y))
+        listRandomizedTiles.append(getTileFromCenterPoint(img, x, y, xSize, ySize))
 
     return listRandomizedTiles
 
@@ -68,69 +69,100 @@ def getAllWaterBodySarGeotiffImage(path, filename = 'data_waterBody.tif'):
         print(e)
     return []
 
+def getAllRawGeotiffImage(path, filename = 'data.tif'):
+    try:
+        ds = rasterio.open(geoTiffPath + path + '/' + filename).read()
+        return ds
+    except Exception as e:
+        print(e)
+    return []
+
 def normalizeWaterBody(img):
-    m, n = img.shape
-    for i in range(m):
-        for j in range(n):
-            if (img[i, j] < 0):
-                img[i, j] = 1
-            else:
-                img[i, j] = 0
+    # m, n = img.shape
+    # for i in range(m):
+    #     for j in range(n):
+    #         if (img[i, j] < 0):
+    #             img[i, j] = 1
+    #         else:
+    #             img[i, j] = 0
     return img
 
-def generateContinousDatasetByFiles(listFile, count = 5, xSize = 400, ySize = 400):
+def saveDataToFile(data, fn, root = './output/'):
+    h5f = h5py.File(root + fn, 'w')
+    h5f.create_dataset('data', data=data)
+    h5f.close()
+
+def generateContinousDatasetByFiles(listFile, count = 5, nRandom = 10, xSize = 400, ySize = 400):
     # input = append(count * xSize * ySize)
     # output = append(xSize * ySize)
+    print('-----------------------------------------------------')
+
+    print('Config:')
+    print('- Input: {0} data point(s)'.format(count))
+    print('- Size: {0} x {1}'.format(xSize, ySize))
+    print('- Randomized Tile on Boundary: {0} tile(s)'.format(nRandom))
+
+    print('-----------------------------------------------------')
+
     data = []
+    
     if len(listFile) < count:
         return data
     for i in range(len(listFile) - count):
         print('[{0}/{1}] Generating from {2}...'.format(i + 1, len(listFile) - count, listFile[i]))
         # Save randomized Tile in dataPoint
-        dataPoint = []
-
-        # Number of random on boundary
-        nRandom = 50
+        # dataPoint = []
 
         # read on (count) continous point of time into geoTiffData
         geoTiffData = []
         for j in range(i, i + count + 1):
-            geoTiffData.append(getAllWaterBodySarGeotiffImage(listFile[j]))
+            geoTiffData.append(getAllRawGeotiffImage(listFile[j]))
 
         # Get number of bands in sar images (usually = 2). All of them will be used.
         nBands, _, __ = geoTiffData[0].shape
 
+        waterBodySample = getAllWaterBodySarGeotiffImage(listFile[0])
+
         # Now generate dataset!
         for band in range(nBands):
             # get list randomzied tile based on boundary of the first point in series
-            listRandomizedTiles = randomizePositionOnBoundary(geoTiffData[0][band], nRandom)
+            listRandomizedTiles = randomizePositionOnBoundary(waterBodySample[band], nRandom, xSize, ySize)
             # Now save all randomized tiles to dataPoint
+            idRandom = 0
             for tile in listRandomizedTiles:
+                idRandom += 1
                 # Extract position
                 topLeft, bottomRight = tile
                 topLeftX, topLeftY = topLeft
                 bottomRightX, bottomRightY = bottomRight
-
                 # Add all tile to continousData
-                continousData = []
+                continousData = numpy.zeros((count + 1, xSize, ySize))
                 for j in range(count + 1):
-                    if len(continousData) == 0:
-                        continousData = [normalizeWaterBody(geoTiffData[j][band][topLeftX:bottomRightX, topLeftY:bottomRightY])]
-                    else:
-                        continousData = numpy.append(continousData, [normalizeWaterBody(geoTiffData[j][band][topLeftX:bottomRightX, topLeftY:bottomRightY])], axis=0)
+                    extractedData = geoTiffData[j][band, topLeftX:bottomRightX, topLeftY:bottomRightY]
+                    continousData[j, :, :] = extractedData
+                    
+                # # Now add to dataPoint
+                # if len(dataPoint) == 0:
+                #     dataPoint = [continousData]
+                # else:
+                #     dataPoint = numpy.append(dataPoint, [continousData], axis=0)
 
-                # Now add to dataPoint
-                if len(dataPoint) == 0:
-                    dataPoint = [continousData]
-                else:
-                    dataPoint = numpy.append(dataPoint, [continousData], axis=0)
-
-        # Almost done. Add dataPoint to timeSeries dataset
-        if len(data) == 0:
-            data = dataPoint
-        else:
-            data = numpy.append(data, dataPoint, axis=0)
-        print('Appended!')
+                # Save Datapoint (continousData)
+                fn = '{0}_{1}_{2}_{3}.hdf5'.format(i+1, listFile[i], band + 1, idRandom)
+                saveDataToFile(continousData, fn)
+                print('--> Saved to: {0}'.format(fn))
+                # return continousData              
+                del continousData
+                # break
+            # break
+        del geoTiffData
+        # break
+        # # Almost done. Add dataPoint to timeSeries dataset
+        # if len(data) == 0:
+        #     data = dataPoint
+        # else:
+        #     data = numpy.append(data, dataPoint, axis=0)
+        # print('Appended!')
 
     # Done
-    return data
+    # return data
